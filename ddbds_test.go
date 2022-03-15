@@ -25,6 +25,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	ds "github.com/ipfs/go-datastore"
 	"github.com/ipfs/go-datastore/query"
+	dstest "github.com/ipfs/go-datastore/test"
 	golog "github.com/ipfs/go-log/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -260,6 +261,33 @@ func cleanupTables(ddbClient *dynamodb.DynamoDB, tables ...table) {
 		if err != nil {
 			panic(err)
 		}
+	}
+}
+
+func TestDDBDatastore_DSTest(t *testing.T) {
+	tbl := table{name: tableName, partitionKey: "key"}
+	setupTables(ddbClient, tbl)
+	defer cleanupTables(ddbClient, tbl)
+
+	ddbDS := &DDBDatastore{
+		ddbClient:       ddbClient,
+		table:           tableName,
+		partitionKey:    "key",
+		scanParallelism: 5,
+	}
+
+	if testing.Short() {
+		dstest.SubtestBasicPutGet(t, ddbDS)
+		dstest.SubtestNotFounds(t, ddbDS)
+		dstest.SubtestPrefix(t, ddbDS)
+		dstest.SubtestOrder(t, ddbDS)
+		dstest.SubtestLimit(t, ddbDS)
+		dstest.SubtestFilter(t, ddbDS)
+		dstest.SubtestManyKeysAndQuery(t, ddbDS)
+		dstest.SubtestReturnSizes(t, ddbDS)
+		dstest.SubtestBasicSync(t, ddbDS)
+	} else {
+		dstest.SubtestAll(t, ddbDS)
 	}
 }
 

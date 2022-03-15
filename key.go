@@ -18,9 +18,8 @@ func namespaces(k ds.Key) []string {
 	return namespaces
 }
 
-func (d *DDBDatastore) queryKey(queryPrefix string) (map[string]*dynamodb.AttributeValue, bool) {
-	queryPrefixKey := ds.NewKey(queryPrefix)
-	queryPrefixNamespaces := namespaces(queryPrefixKey)
+func (d *DDBDatastore) queryKey(queryPrefix ds.Key) (map[string]*dynamodb.AttributeValue, bool) {
+	queryPrefixNamespaces := namespaces(queryPrefix)
 
 	if len(queryPrefixNamespaces) == 0 {
 		return nil, false

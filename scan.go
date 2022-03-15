@@ -57,6 +57,7 @@ func (s *scanIterator) worker(ctx context.Context, segment int64, totalSegments 
 			req.ProjectionExpression = aws.String(attrNameKey)
 		}
 
+		log.Debugw("scanning", "Req", req)
 		res, err := s.ddbClient.ScanWithContext(s.ctx, req)
 		if err != nil {
 			if s.trySend(query.Result{Error: err}) {

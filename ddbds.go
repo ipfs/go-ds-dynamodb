@@ -160,22 +160,30 @@ func unmarshalItem(itemMap map[string]*dynamodb.AttributeValue) (*ddbItem, error
 // If attributes is non-nil, only those attributes are fetched. This doesn't reduce consumed read capacity,
 // it only reduces the amount of data transferred.
 func (d *DDBDatastore) getItem(ctx context.Context, key ds.Key, attributes []string) (*ddbItem, error) {
-	var projExpr *string
-	if attributes != nil {
-		projExpr = aws.String(strings.Join(attributes, ","))
-	}
-
 	keyAttrs, ok := d.getKey(key)
 	if !ok {
 		return nil, ErrInvalidKey
 	}
 
-	res, err := d.ddbClient.GetItemWithContext(ctx, &dynamodb.GetItemInput{
-		TableName:            &d.table,
-		Key:                  keyAttrs,
-		ConsistentRead:       &d.useStronglyConsistentReads,
-		ProjectionExpression: projExpr,
-	})
+	req := &dynamodb.GetItemInput{
+		TableName:      &d.table,
+		Key:            keyAttrs,
+		ConsistentRead: &d.useStronglyConsistentReads,
+	}
+
+	if attributes != nil {
+		projExprStrs := []string{}
+		projExprNames := map[string]*string{}
+		for i, attr := range attributes {
+			expr := fmt.Sprintf("#k%d", i)
+			projExprNames[expr] = aws.String(attr)
+			projExprStrs = append(projExprStrs, expr)
+		}
+		req.ProjectionExpression = aws.String(strings.Join(projExprStrs, ","))
+		req.ExpressionAttributeNames = projExprNames
+	}
+
+	res, err := d.ddbClient.GetItemWithContext(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -200,9 +208,10 @@ func (d *DDBDatastore) Has(ctx context.Context, key ds.Key) (bool, error) {
 	}
 
 	res, err := d.ddbClient.GetItemWithContext(ctx, &dynamodb.GetItemInput{
-		TableName:            &d.table,
-		Key:                  keyAttrs,
-		ProjectionExpression: &d.partitionKey,
+		TableName:                &d.table,
+		Key:                      keyAttrs,
+		ProjectionExpression:     aws.String("#k"),
+		ExpressionAttributeNames: map[string]*string{"#k": &d.partitionKey},
 	})
 	if err != nil {
 		return false, err
@@ -213,6 +222,9 @@ func (d *DDBDatastore) Has(ctx context.Context, key ds.Key) (bool, error) {
 func (d *DDBDatastore) GetSize(ctx context.Context, key ds.Key) (size int, err error) {
 	item, err := d.getItem(ctx, key, []string{attrNameSize})
 	if err != nil {
+		if errors.Is(err, ds.ErrNotFound) {
+			return -1, err
+		}
 		return 0, err
 	}
 	return int(item.Size), nil
@@ -306,7 +318,8 @@ func (d *DDBDatastore) Query(ctx context.Context, q query.Query) (query.Results,
 
 	var results query.Results
 
-	keyAttrs, hasQueryKey := d.queryKey(q.Prefix)
+	prefix := ds.NewKey(q.Prefix)
+	keyAttrs, hasQueryKey := d.queryKey(prefix)
 
 	shouldQuery := d.sortKey != "" && hasQueryKey
 	if shouldQuery {
@@ -359,7 +372,7 @@ func (d *DDBDatastore) Query(ctx context.Context, q query.Query) (query.Results,
 	}
 
 	// append / so a prefix of /bar only finds /bar/baz, not /barbaz
-	queryPrefix := q.Prefix
+	queryPrefix := prefix.String()
 	if len(queryPrefix) > 0 && queryPrefix[len(queryPrefix)-1] != '/' {
 		queryPrefix += "/"
 	}
