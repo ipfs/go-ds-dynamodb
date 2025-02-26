@@ -65,7 +65,6 @@ func (q *queryIterator) Next() (query.Result, bool) {
 	return res, ok
 }
 
-func (q *queryIterator) Close() error {
+func (q *queryIterator) Close() {
 	q.cancel()
-	return nil
 }
