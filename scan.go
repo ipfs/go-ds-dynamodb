@@ -115,8 +115,9 @@ func (s *scanIterator) Next() (query.Result, bool) {
 	return result, ok
 }
 
-func (s *scanIterator) Close() {
+func (s *scanIterator) Close() error {
 	s.cancel()
 	s.doneWG.Wait()
 	s.closeOnce.Do(func() { close(s.resultChan) })
+	return nil
 }
