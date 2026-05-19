@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
-	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	ds "github.com/ipfs/go-datastore"
 	"github.com/ipfs/go-datastore/query"
 	golog "github.com/ipfs/go-log/v2"
@@ -80,7 +80,7 @@ var _ ds.Datastore = (*DDBDatastore)(nil)
 var _ ds.Batching = (*DDBDatastore)(nil)
 var _ ds.PersistentDatastore = (*DDBDatastore)(nil)
 
-func New(ddbClient *dynamodb.DynamoDB, table string, optFns ...func(o *Options)) *DDBDatastore {
+func New(ddbClient *dynamodb.Client, table string, optFns ...func(o *Options)) *DDBDatastore {
 	opts := Options{}
 	for _, o := range optFns {
 		o(&opts)
@@ -110,7 +110,7 @@ func New(ddbClient *dynamodb.DynamoDB, table string, optFns ...func(o *Options))
 }
 
 type DDBDatastore struct {
-	ddbClient *dynamodb.DynamoDB
+	ddbClient *dynamodb.Client
 	table     string
 
 	useStronglyConsistentReads bool
@@ -121,7 +121,7 @@ type DDBDatastore struct {
 	// If specified, then all keys must have at least 2 parts (for partition and sort keys).
 	sortKey string
 
-	// Controls the parallelism of scans that are preformed for unoptimized datastore queries.
+	// Controls the parallelism of scans that are performed for unoptimized datastore queries.
 	// Unoptimized datastore queries are queries without registered query prefixes, and always
 	// result in full table scans.
 	scanParallelism int
@@ -147,9 +147,9 @@ func (d *ddbItem) GetExpiration() time.Time {
 	return time.Unix(d.Expiration, 0)
 }
 
-func unmarshalItem(itemMap map[string]*dynamodb.AttributeValue) (*ddbItem, error) {
+func unmarshalItem(itemMap map[string]types.AttributeValue) (*ddbItem, error) {
 	item := &ddbItem{}
-	err := dynamodbattribute.UnmarshalMap(itemMap, item)
+	err := attributevalue.UnmarshalMap(itemMap, item)
 	if err != nil {
 		return nil, fmt.Errorf("unmarshaling item: %w", err)
 	}
@@ -173,17 +173,17 @@ func (d *DDBDatastore) getItem(ctx context.Context, key ds.Key, attributes []str
 
 	if attributes != nil {
 		projExprStrs := []string{}
-		projExprNames := map[string]*string{}
+		projExprNames := map[string]string{}
 		for i, attr := range attributes {
 			expr := fmt.Sprintf("#k%d", i)
-			projExprNames[expr] = aws.String(attr)
+			projExprNames[expr] = attr
 			projExprStrs = append(projExprStrs, expr)
 		}
 		req.ProjectionExpression = aws.String(strings.Join(projExprStrs, ","))
 		req.ExpressionAttributeNames = projExprNames
 	}
 
-	res, err := d.ddbClient.GetItemWithContext(ctx, req)
+	res, err := d.ddbClient.GetItem(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -207,11 +207,11 @@ func (d *DDBDatastore) Has(ctx context.Context, key ds.Key) (bool, error) {
 		return false, ErrInvalidKey
 	}
 
-	res, err := d.ddbClient.GetItemWithContext(ctx, &dynamodb.GetItemInput{
+	res, err := d.ddbClient.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName:                &d.table,
 		Key:                      keyAttrs,
 		ProjectionExpression:     aws.String("#k"),
-		ExpressionAttributeNames: map[string]*string{"#k": &d.partitionKey},
+		ExpressionAttributeNames: map[string]string{"#k": d.partitionKey},
 	})
 	if err != nil {
 		return false, err
@@ -230,7 +230,7 @@ func (d *DDBDatastore) GetSize(ctx context.Context, key ds.Key) (size int, err e
 	return int(item.Size), nil
 }
 
-func (d *DDBDatastore) makePutItem(key ds.Key, value []byte, ttl time.Duration) (map[string]*dynamodb.AttributeValue, error) {
+func (d *DDBDatastore) makePutItem(key ds.Key, value []byte, ttl time.Duration) (map[string]types.AttributeValue, error) {
 	keyAttrs, ok := d.putKey(key)
 	if !ok {
 		return nil, ErrInvalidKey
@@ -245,7 +245,7 @@ func (d *DDBDatastore) makePutItem(key ds.Key, value []byte, ttl time.Duration) 
 		item.Expiration = time.Now().Add(ttl).Unix()
 	}
 
-	itemMap, err := dynamodbattribute.MarshalMap(*item)
+	itemMap, err := attributevalue.MarshalMap(*item)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling item: %w", err)
 	}
@@ -269,7 +269,7 @@ func (d *DDBDatastore) put(ctx context.Context, key ds.Key, value []byte, ttl ti
 
 	log.Debugw("putting items", "Item", req)
 
-	_, err = d.ddbClient.PutItemWithContext(ctx, req)
+	_, err = d.ddbClient.PutItem(ctx, req)
 	log.Debug("done putting items")
 	if err != nil {
 		return fmt.Errorf("putting DynamoDB item '%s' into table '%s': %w", key.String(), d.table, err)
@@ -282,7 +282,7 @@ func (d *DDBDatastore) Put(ctx context.Context, key ds.Key, value []byte) error 
 	return d.put(ctx, key, value, time.Duration(0))
 }
 
-func (d *DDBDatastore) makeDeleteItemMap(key ds.Key) (map[string]*dynamodb.AttributeValue, error) {
+func (d *DDBDatastore) makeDeleteItemMap(key ds.Key) (map[string]types.AttributeValue, error) {
 	keyAttrs, ok := d.getKey(key)
 	if !ok {
 		return nil, ErrInvalidKey
@@ -300,7 +300,7 @@ func (d *DDBDatastore) Delete(ctx context.Context, key ds.Key) error {
 		Key:       itemMap,
 	}
 
-	_, err = d.ddbClient.DeleteItemWithContext(ctx, req)
+	_, err = d.ddbClient.DeleteItem(ctx, req)
 	if err != nil {
 		// note that DeleteItem is idempotent in that deleting an non-existent item returns a 200 w/ no error
 		// which is congruent with the Datastore interface
@@ -328,12 +328,12 @@ func (d *DDBDatastore) Query(ctx context.Context, q query.Query) (query.Results,
 			return nil, fmt.Errorf("queries on '%s' are disabled", d.table)
 		}
 
-		partitionKeyValue := *keyAttrs[d.partitionKey].S
+		partitionKeyValue := keyAttrs[d.partitionKey].(*types.AttributeValueMemberS).Value
 		ddbQuery := &dynamodb.QueryInput{
 			TableName:                 &d.table,
 			KeyConditionExpression:    aws.String("#k = :v"),
-			ExpressionAttributeNames:  map[string]*string{"#k": &d.partitionKey},
-			ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{":v": {S: &partitionKeyValue}},
+			ExpressionAttributeNames:  map[string]string{"#k": d.partitionKey},
+			ExpressionAttributeValues: map[string]types.AttributeValue{":v": &types.AttributeValueMemberS{Value: partitionKeyValue}},
 			ConsistentRead:            &d.useStronglyConsistentReads,
 		}
 
@@ -417,22 +417,21 @@ func (d *DDBDatastore) SetTTL(ctx context.Context, key ds.Key, ttl time.Duration
 		TableName:        &d.table,
 		Key:              keyAttrs,
 		UpdateExpression: aws.String(fmt.Sprintf("SET %s = :e", attrNameExpiration)),
-		ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
-			":e": {N: &expirationStr},
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":e": &types.AttributeValueMemberN{Value: expirationStr},
 		},
 		ConditionExpression:      aws.String("attribute_exists(#k)"),
-		ExpressionAttributeNames: map[string]*string{"#k": aws.String(attrNameKey)},
+		ExpressionAttributeNames: map[string]string{"#k": attrNameKey},
 	}
 
 	log.Debugw("updating TTL", "Item", req)
 
-	_, err := d.ddbClient.UpdateItemWithContext(ctx, req)
+	_, err := d.ddbClient.UpdateItem(ctx, req)
 	if err != nil {
-		if awsErr, ok := err.(awserr.Error); ok {
+		var ccf *types.ConditionalCheckFailedException
+		if errors.As(err, &ccf) {
 			// the conditional check failed which means there is no such item to set the TTL on
-			if awsErr.Code() == dynamodb.ErrCodeConditionalCheckFailedException {
-				return ds.ErrNotFound
-			}
+			return ds.ErrNotFound
 		}
 		return fmt.Errorf("setting TTL DynamoDB item to table '%s': %w", d.table, err)
 	}
@@ -450,7 +449,7 @@ func (d *DDBDatastore) GetExpiration(ctx context.Context, key ds.Key) (time.Time
 // Note that DynamoDB only updates this size once every few hours.
 // The underlying call is heavily throttled so this should only be called occasionally.
 func (d *DDBDatastore) DiskUsage(ctx context.Context) (uint64, error) {
-	res, err := d.ddbClient.DescribeTable(&dynamodb.DescribeTableInput{TableName: &d.table})
+	res, err := d.ddbClient.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: &d.table})
 	if err != nil {
 		return 0, err
 	}
@@ -458,7 +457,7 @@ func (d *DDBDatastore) DiskUsage(ctx context.Context) (uint64, error) {
 }
 
 func (d *DDBDatastore) EntryCount(ctx context.Context) (uint64, error) {
-	res, err := d.ddbClient.DescribeTable(&dynamodb.DescribeTableInput{TableName: &d.table})
+	res, err := d.ddbClient.DescribeTable(ctx, &dynamodb.DescribeTableInput{TableName: &d.table})
 	if err != nil {
 		return 0, err
 	}

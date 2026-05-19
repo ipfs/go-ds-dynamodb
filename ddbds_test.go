@@ -16,13 +16,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/endpoints"
-	"github.com/aws/aws-sdk-go/aws/request"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/aws/smithy-go/middleware"
 	ds "github.com/ipfs/go-datastore"
 	"github.com/ipfs/go-datastore/query"
 	dstest "github.com/ipfs/go-datastore/test"
@@ -41,7 +40,7 @@ var (
 
 	logLevel = golog.LevelInfo
 
-	ddbClient *dynamodb.DynamoDB
+	ddbClient *dynamodb.Client
 )
 
 func init() {
@@ -116,7 +115,7 @@ func downloadDDBLocal(ctx context.Context) error {
 	return nil
 }
 
-func startDDBLocal(ctx context.Context, ddbClient *dynamodb.DynamoDB) (func(), error) {
+func startDDBLocal(ctx context.Context, ddbClient *dynamodb.Client) (func(), error) {
 	var cleanupFunc func()
 
 	// in CI, run DynamoDB Local directly with Java
@@ -175,7 +174,7 @@ func startDDBLocal(ctx context.Context, ddbClient *dynamodb.DynamoDB) (func(), e
 			return nil, ctx.Err()
 		default:
 		}
-		_, err := ddbClient.ListTablesWithContext(ctx, &dynamodb.ListTablesInput{})
+		_, err := ddbClient.ListTables(ctx, &dynamodb.ListTablesInput{})
 		if err == nil {
 			break
 		}
@@ -184,10 +183,18 @@ func startDDBLocal(ctx context.Context, ddbClient *dynamodb.DynamoDB) (func(), e
 	return cleanupFunc, nil
 }
 
-func forceSDKError(err error) func(*request.Request) {
-	return func(r *request.Request) {
-		r.Error = err
-		r.Retryable = aws.Bool(false)
+// forceSDKErrorMiddleware short-circuits a request with err at the Initialize
+// step of the smithy-go middleware stack, before any HTTP work.
+func forceSDKErrorMiddleware(err error) func(*middleware.Stack) error {
+	return func(stack *middleware.Stack) error {
+		return stack.Initialize.Add(
+			middleware.InitializeMiddlewareFunc("forceSDKError",
+				func(ctx context.Context, in middleware.InitializeInput, next middleware.InitializeHandler,
+				) (middleware.InitializeOutput, middleware.Metadata, error) {
+					return middleware.InitializeOutput{}, middleware.Metadata{}, err
+				}),
+			middleware.Before,
+		)
 	}
 }
 
@@ -196,18 +203,21 @@ type clientOpts struct {
 	forceError error
 }
 
-func newDDBClient(opts clientOpts) *dynamodb.DynamoDB {
-	cfg := &aws.Config{
-		Credentials: credentials.NewStaticCredentials("a", "a", "a"),
-		DisableSSL:  aws.Bool(true),
-		Region:      aws.String(endpoints.UsEast1RegionID),
-		Endpoint:    &opts.endpoint,
+func newDDBClient(opts clientOpts) *dynamodb.Client {
+	cfg, err := config.LoadDefaultConfig(context.Background(),
+		config.WithRegion("us-east-1"),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("a", "a", "a")),
+	)
+	if err != nil {
+		panic(err)
 	}
-	sess := session.Must(session.NewSession(cfg))
-	if opts.forceError != nil {
-		sess.Handlers.Send.PushFront(forceSDKError(opts.forceError))
-	}
-	return dynamodb.New(sess)
+	return dynamodb.NewFromConfig(cfg, func(o *dynamodb.Options) {
+		o.BaseEndpoint = aws.String(opts.endpoint)
+		o.EndpointOptions.DisableHTTPS = true
+		if opts.forceError != nil {
+			o.APIOptions = append(o.APIOptions, forceSDKErrorMiddleware(opts.forceError))
+		}
+	})
 }
 
 type table struct {
@@ -216,37 +226,39 @@ type table struct {
 	sortKey      string
 }
 
-func setupTables(ddbClient *dynamodb.DynamoDB, tables ...table) {
+func setupTables(ddbClient *dynamodb.Client, tables ...table) {
+	ctx := context.Background()
 	for _, table := range tables {
 		tbl := table
 
-		attrDefs := []*dynamodb.AttributeDefinition{
-			{AttributeName: &tbl.partitionKey, AttributeType: aws.String(dynamodb.ScalarAttributeTypeS)},
+		attrDefs := []types.AttributeDefinition{
+			{AttributeName: &tbl.partitionKey, AttributeType: types.ScalarAttributeTypeS},
 		}
-		keySchema := []*dynamodb.KeySchemaElement{
-			{AttributeName: &tbl.partitionKey, KeyType: aws.String(dynamodb.KeyTypeHash)},
+		keySchema := []types.KeySchemaElement{
+			{AttributeName: &tbl.partitionKey, KeyType: types.KeyTypeHash},
 		}
 		if tbl.sortKey != "" {
-			attrDefs = append(attrDefs, &dynamodb.AttributeDefinition{AttributeName: &tbl.sortKey, AttributeType: aws.String(dynamodb.ScalarAttributeTypeS)})
-			keySchema = append(keySchema, &dynamodb.KeySchemaElement{AttributeName: &tbl.sortKey, KeyType: aws.String(dynamodb.KeyTypeRange)})
+			attrDefs = append(attrDefs, types.AttributeDefinition{AttributeName: &tbl.sortKey, AttributeType: types.ScalarAttributeTypeS})
+			keySchema = append(keySchema, types.KeySchemaElement{AttributeName: &tbl.sortKey, KeyType: types.KeyTypeRange})
 		}
 
 		req := &dynamodb.CreateTableInput{
 			AttributeDefinitions: attrDefs,
 			KeySchema:            keySchema,
 			TableName:            &tbl.name,
-			BillingMode:          aws.String(dynamodb.BillingModeProvisioned),
-			ProvisionedThroughput: &dynamodb.ProvisionedThroughput{
+			BillingMode:          types.BillingModeProvisioned,
+			ProvisionedThroughput: &types.ProvisionedThroughput{
 				ReadCapacityUnits:  aws.Int64(1000),
 				WriteCapacityUnits: aws.Int64(1000),
 			},
 		}
 
 		log.Debugw("creating table", "Table", tbl.name, "Req", req)
-		_, err := ddbClient.CreateTable(req)
+		_, err := ddbClient.CreateTable(ctx, req)
 		if err != nil {
 			// idempotency
-			if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == dynamodb.ErrCodeResourceInUseException {
+			var riu *types.ResourceInUseException
+			if errors.As(err, &riu) {
 				return
 			}
 			panic(err)
@@ -254,10 +266,11 @@ func setupTables(ddbClient *dynamodb.DynamoDB, tables ...table) {
 	}
 }
 
-func cleanupTables(ddbClient *dynamodb.DynamoDB, tables ...table) {
+func cleanupTables(ddbClient *dynamodb.Client, tables ...table) {
+	ctx := context.Background()
 	for _, t := range tables {
 		log.Debugw("deleting table", "Table", t.name)
-		_, err := ddbClient.DeleteTable(&dynamodb.DeleteTableInput{TableName: &t.name})
+		_, err := ddbClient.DeleteTable(ctx, &dynamodb.DeleteTableInput{TableName: &t.name})
 		if err != nil {
 			panic(err)
 		}

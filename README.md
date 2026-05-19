@@ -19,7 +19,7 @@ In this case, all datastore queries will result in full table scans using the Pa
 This is a good option if your table is small or your data and access patterns would not significantly benefit from optimized queries.
 
 ```go
-var ddbClient *dynamodb.DynamoDB = ...
+var ddbClient *dynamodb.Client = ...
 tableName := "datastore-table"
 ddbDS := ddbds.New(ddbClient, tableName)
 ```
@@ -42,7 +42,7 @@ Also, elements written into the datastore should have at least 2 parts, such as 
 To use optimized queries, simply specify the sort key name using the `WithSortKey()` option:
 
 ```go
-var ddbClient *dynamodb.DynamoDB = ...
+var ddbClient *dynamodb.Client = ...
 tableName := "datastore-table"
 ddbDS := ddbds.New(
 	ddbClient, 

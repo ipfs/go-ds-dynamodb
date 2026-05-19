@@ -3,8 +3,7 @@ package ddbds
 import (
 	"strings"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	ds "github.com/ipfs/go-datastore"
 )
 
@@ -18,32 +17,31 @@ func namespaces(k ds.Key) []string {
 	return namespaces
 }
 
-func (d *DDBDatastore) queryKey(queryPrefix ds.Key) (map[string]*dynamodb.AttributeValue, bool) {
+func (d *DDBDatastore) queryKey(queryPrefix ds.Key) (map[string]types.AttributeValue, bool) {
 	queryPrefixNamespaces := namespaces(queryPrefix)
 
 	if len(queryPrefixNamespaces) == 0 {
 		return nil, false
 	}
 
-	return map[string]*dynamodb.AttributeValue{
-		d.partitionKey: {S: &queryPrefixNamespaces[0]},
+	return map[string]types.AttributeValue{
+		d.partitionKey: &types.AttributeValueMemberS{Value: queryPrefixNamespaces[0]},
 	}, true
 }
 
-func (d *DDBDatastore) putKey(key ds.Key) (map[string]*dynamodb.AttributeValue, bool) {
+func (d *DDBDatastore) putKey(key ds.Key) (map[string]types.AttributeValue, bool) {
 	attrs, ok := d.getKey(key)
-	attrs[attrNameKey] = &dynamodb.AttributeValue{S: aws.String(key.String())}
+	attrs[attrNameKey] = &types.AttributeValueMemberS{Value: key.String()}
 	return attrs, ok
 }
 
-func (d *DDBDatastore) getKey(key ds.Key) (map[string]*dynamodb.AttributeValue, bool) {
+func (d *DDBDatastore) getKey(key ds.Key) (map[string]types.AttributeValue, bool) {
 	keyNamespaces := namespaces(key)
 
-	attrs := map[string]*dynamodb.AttributeValue{}
+	attrs := map[string]types.AttributeValue{}
 
 	if d.sortKey == "" {
-		partitionKey := key.String()
-		attrs[d.partitionKey] = &dynamodb.AttributeValue{S: &partitionKey}
+		attrs[d.partitionKey] = &types.AttributeValueMemberS{Value: key.String()}
 	} else {
 		// if there's a sort key, then the first element of the trimmed key is the partition key
 		// and the rest of the trimmed key is the sort key
@@ -54,11 +52,8 @@ func (d *DDBDatastore) getKey(key ds.Key) (map[string]*dynamodb.AttributeValue, 
 			return nil, false
 		}
 
-		partitionKey := keyNamespaces[0]
-		attrs[d.partitionKey] = &dynamodb.AttributeValue{S: &partitionKey}
-
-		sortKey := strings.Join(keyNamespaces[1:], "/")
-		attrs[d.sortKey] = &dynamodb.AttributeValue{S: &sortKey}
+		attrs[d.partitionKey] = &types.AttributeValueMemberS{Value: keyNamespaces[0]}
+		attrs[d.sortKey] = &types.AttributeValueMemberS{Value: strings.Join(keyNamespaces[1:], "/")}
 	}
 
 	return attrs, true

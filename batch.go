@@ -6,7 +6,8 @@ import (
 	"math"
 	"time"
 
-	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/ipfs/go-datastore"
 )
 
@@ -54,7 +55,7 @@ func (b *batch) commitKeys(ctx context.Context, keys []datastore.Key) error {
 	errs := make(chan error)
 	chunks := chunk(len(keys), 25)
 	for _, chunk := range chunks {
-		var writeReqs []*dynamodb.WriteRequest
+		var writeReqs []types.WriteRequest
 		for _, keyIdx := range chunk {
 			k := keys[keyIdx]
 			v := b.reqs[k]
@@ -64,8 +65,8 @@ func (b *batch) commitKeys(ctx context.Context, keys []datastore.Key) error {
 				if err != nil {
 					return err
 				}
-				writeReqs = append(writeReqs, &dynamodb.WriteRequest{
-					PutRequest: &dynamodb.PutRequest{Item: itemMap},
+				writeReqs = append(writeReqs, types.WriteRequest{
+					PutRequest: &types.PutRequest{Item: itemMap},
 				})
 			} else {
 				// delete
@@ -73,8 +74,8 @@ func (b *batch) commitKeys(ctx context.Context, keys []datastore.Key) error {
 				if err != nil {
 					return err
 				}
-				writeReqs = append(writeReqs, &dynamodb.WriteRequest{
-					DeleteRequest: &dynamodb.DeleteRequest{Key: itemMap},
+				writeReqs = append(writeReqs, types.WriteRequest{
+					DeleteRequest: &types.DeleteRequest{Key: itemMap},
 				})
 			}
 
@@ -93,7 +94,7 @@ func (b *batch) commitKeys(ctx context.Context, keys []datastore.Key) error {
 
 }
 
-func (b *batch) commitChunk(ctx context.Context, errs chan<- error, chunk []*dynamodb.WriteRequest) {
+func (b *batch) commitChunk(ctx context.Context, errs chan<- error, chunk []types.WriteRequest) {
 	attempts := 0
 
 	var err error
@@ -110,9 +111,9 @@ func (b *batch) commitChunk(ctx context.Context, errs chan<- error, chunk []*dyn
 		attempts++
 
 		batchReq := dynamodb.BatchWriteItemInput{
-			RequestItems: map[string][]*dynamodb.WriteRequest{b.ds.table: chunk},
+			RequestItems: map[string][]types.WriteRequest{b.ds.table: chunk},
 		}
-		res, err = b.ds.ddbClient.BatchWriteItemWithContext(ctx, &batchReq)
+		res, err = b.ds.ddbClient.BatchWriteItem(ctx, &batchReq)
 		if err != nil {
 			return
 		}
