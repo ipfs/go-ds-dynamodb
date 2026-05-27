@@ -31,8 +31,11 @@ func (d *DDBDatastore) queryKey(queryPrefix ds.Key) (map[string]types.AttributeV
 
 func (d *DDBDatastore) putKey(key ds.Key) (map[string]types.AttributeValue, bool) {
 	attrs, ok := d.getKey(key)
+	if !ok {
+		return nil, false
+	}
 	attrs[attrNameKey] = &types.AttributeValueMemberS{Value: key.String()}
-	return attrs, ok
+	return attrs, true
 }
 
 func (d *DDBDatastore) getKey(key ds.Key) (map[string]types.AttributeValue, bool) {
