@@ -168,15 +168,14 @@ func startDDBLocal(ctx context.Context, ddbClient *dynamodb.Client) (func(), err
 
 	// wait for DynamoDB to respond
 	for {
+		if _, err := ddbClient.ListTables(ctx, &dynamodb.ListTablesInput{}); err == nil {
+			break
+		}
 		select {
 		case <-ctx.Done():
 			cleanupFunc()
 			return nil, ctx.Err()
-		default:
-		}
-		_, err := ddbClient.ListTables(ctx, &dynamodb.ListTablesInput{})
-		if err == nil {
-			break
+		case <-time.After(100 * time.Millisecond):
 		}
 	}
 
