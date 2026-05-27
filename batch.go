@@ -139,7 +139,10 @@ func (b *batch) commitChunk(ctx context.Context, errs chan<- error, chunk []type
 		}
 	}
 
-	err = fmt.Errorf("reached max attempts (%d) trying to commit batch to DynamoDB, last error: %w", maxBatchChunkAttempts, err)
+	// We exhausted retries while DynamoDB kept returning UnprocessedItems.
+	// err is nil here, because any BatchWriteItem error path returns early
+	// above; wrapping it with %w would render as "<nil>".
+	err = fmt.Errorf("batch had unprocessed items after %d attempts", maxBatchChunkAttempts)
 }
 
 // chunk returns a list of chunks, each consisting of a list of array indexes.
