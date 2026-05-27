@@ -42,18 +42,13 @@ func (q *queryIterator) start(ctx context.Context) {
 				if ctx.Err() != nil {
 					return
 				}
-				select {
-				case <-ctx.Done():
-				case q.resultChan <- query.Result{Error: err}:
-				}
+				trySend(ctx, q.resultChan, query.Result{Error: err})
 				return
 			}
 			for _, itemMap := range page.Items {
 				result := itemMapToQueryResult(itemMap, q.keysOnly)
-				select {
-				case <-ctx.Done():
+				if !trySend(ctx, q.resultChan, result) {
 					return
-				case q.resultChan <- result:
 				}
 			}
 		}

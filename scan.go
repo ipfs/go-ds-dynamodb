@@ -27,14 +27,16 @@ type scanIterator struct {
 	cancel     context.CancelFunc
 }
 
-func (s *scanIterator) trySend(result query.Result) bool {
-	log.Debugw("sending scan result", "Result", result)
+// trySend forwards r to ch, or bails out if ctx is cancelled first.
+// Returns true when r was delivered, false when the send lost the race
+// to context cancellation.
+func trySend(ctx context.Context, ch chan<- query.Result, r query.Result) bool {
 	select {
-	case <-s.ctx.Done():
+	case <-ctx.Done():
+		return false
+	case ch <- r:
 		return true
-	case s.resultChan <- result:
 	}
-	return false
 }
 
 func (s *scanIterator) worker(segment int32, totalSegments int32) {
@@ -60,13 +62,15 @@ func (s *scanIterator) worker(segment int32, totalSegments int32) {
 		log.Debugw("scanning", "Req", req)
 		res, err := s.ddbClient.Scan(s.ctx, req)
 		if err != nil {
-			s.trySend(query.Result{Error: err})
+			log.Debugw("sending scan result", "Result", query.Result{Error: err})
+			trySend(s.ctx, s.resultChan, query.Result{Error: err})
 			return
 		}
 		for _, itemMap := range res.Items {
 			log.Debugw("scan got items", "NumItems", len(res.Items))
 			result := itemMapToQueryResult(itemMap, s.keysOnly)
-			if s.trySend(result) {
+			log.Debugw("sending scan result", "Result", result)
+			if !trySend(s.ctx, s.resultChan, result) {
 				return
 			}
 		}
