@@ -17,6 +17,16 @@ The following emojis are used to highlight certain changes:
 
 ### Changed
 
+### Removed
+
+### Fixed
+
+### Security
+
+## [v0.3.0] - 2026-05-27
+
+### Changed
+
 - 🛠 Migrated from `aws-sdk-go` (v1, end-of-support as of v1.55.8) to `aws-sdk-go-v2` ([#22](https://github.com/ipfs/go-ds-dynamodb/pull/22)). `New()` now accepts `*dynamodb.Client` from `github.com/aws/aws-sdk-go-v2/service/dynamodb` instead of `*dynamodb.DynamoDB` from `github.com/aws/aws-sdk-go`. Attribute marshaling moves to `feature/dynamodb/attributevalue`. `AttributeValue` becomes an interface with `types.AttributeValueMember*` concrete members. `ExpressionAttributeNames` is now `map[string]string`, since v2 dropped `*string`. Errors are matched with `errors.As` against `*types.ConditionalCheckFailedException` and `*types.ResourceInUseException` instead of `awserr.Error.Code()`. Queries page through `dynamodb.NewQueryPaginator`. Every `*WithContext` method collapses to its ctx-first equivalent.
 
     **Action required.** Build clients with the v2 SDK and pass them to `ddbds.New`:
