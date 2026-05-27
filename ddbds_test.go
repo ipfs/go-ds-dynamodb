@@ -256,10 +256,11 @@ func setupTables(ddbClient *dynamodb.Client, tables ...table) {
 		log.Debugw("creating table", "Table", tbl.name, "Req", req)
 		_, err := ddbClient.CreateTable(ctx, req)
 		if err != nil {
-			// idempotency
+			// idempotency: an already-existing table is fine, keep going
+			// with the rest of the requested tables.
 			var riu *types.ResourceInUseException
 			if errors.As(err, &riu) {
-				return
+				continue
 			}
 			panic(err)
 		}
