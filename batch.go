@@ -3,15 +3,23 @@ package ddbds
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math"
+	"math/rand/v2"
+	"slices"
 	"time"
 
-	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/ipfs/go-datastore"
 )
 
 const (
 	maxBatchChunkAttempts = 3
+	// dynamoBatchMaxItems is the BatchWriteItem hard limit imposed by
+	// DynamoDB: at most 25 put-or-delete requests per call. See
+	// https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_BatchWriteItem.html
+	dynamoBatchMaxItems = 25
 )
 
 func (d *DDBDatastore) Batch(_ context.Context) (datastore.Batch, error) {
@@ -39,24 +47,24 @@ func (b *batch) Delete(ctx context.Context, key datastore.Key) error {
 }
 
 func (b *batch) Commit(ctx context.Context) error {
-	var keys []datastore.Key
-	for k := range b.reqs {
-		keys = append(keys, k)
-	}
-	return b.commitKeys(ctx, keys)
+	return b.commitKeys(ctx, slices.Collect(maps.Keys(b.reqs)))
 }
 
 func (b *batch) commitKeys(ctx context.Context, keys []datastore.Key) error {
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
 
-	log.Debugf("committing batch", "Batch", keys)
-	errs := make(chan error)
-	chunks := chunk(len(keys), 25)
-	for _, chunk := range chunks {
-		var writeReqs []*dynamodb.WriteRequest
-		for _, keyIdx := range chunk {
-			k := keys[keyIdx]
+	log.Debugw("committing batch", "Batch", keys)
+	// Buffer errs so each goroutine's send always succeeds without a
+	// receiver, even when ctx is cancelled. With an unbuffered channel
+	// the deferred select below would race ctx.Done against the err
+	// send and could exit silently, leaving the parent loop blocked on
+	// <-errs forever.
+	chunkCount := (len(keys) + dynamoBatchMaxItems - 1) / dynamoBatchMaxItems
+	errs := make(chan error, chunkCount)
+	for keyChunk := range slices.Chunk(keys, dynamoBatchMaxItems) {
+		writeReqs := make([]types.WriteRequest, 0, len(keyChunk))
+		for _, k := range keyChunk {
 			v := b.reqs[k]
 			if v != nil {
 				// put
@@ -64,8 +72,8 @@ func (b *batch) commitKeys(ctx context.Context, keys []datastore.Key) error {
 				if err != nil {
 					return err
 				}
-				writeReqs = append(writeReqs, &dynamodb.WriteRequest{
-					PutRequest: &dynamodb.PutRequest{Item: itemMap},
+				writeReqs = append(writeReqs, types.WriteRequest{
+					PutRequest: &types.PutRequest{Item: itemMap},
 				})
 			} else {
 				// delete
@@ -73,46 +81,40 @@ func (b *batch) commitKeys(ctx context.Context, keys []datastore.Key) error {
 				if err != nil {
 					return err
 				}
-				writeReqs = append(writeReqs, &dynamodb.WriteRequest{
-					DeleteRequest: &dynamodb.DeleteRequest{Key: itemMap},
+				writeReqs = append(writeReqs, types.WriteRequest{
+					DeleteRequest: &types.DeleteRequest{Key: itemMap},
 				})
 			}
-
 		}
 		go b.commitChunk(ctx, errs, writeReqs)
 	}
 
-	for i := 0; i < len(chunks); i++ {
-		err := <-errs
-		if err != nil {
+	for range chunkCount {
+		if err := <-errs; err != nil {
 			return err
 		}
 	}
 
 	return nil
-
 }
 
-func (b *batch) commitChunk(ctx context.Context, errs chan<- error, chunk []*dynamodb.WriteRequest) {
+func (b *batch) commitChunk(ctx context.Context, errs chan<- error, chunk []types.WriteRequest) {
 	attempts := 0
 
 	var err error
 
-	defer func() {
-		select {
-		case errs <- err:
-		case <-ctx.Done():
-		}
-	}()
+	// errs is buffered to chunkCount in commitKeys, so this send never
+	// blocks even if the parent has already returned.
+	defer func() { errs <- err }()
 
 	var res *dynamodb.BatchWriteItemOutput
 	for attempts < maxBatchChunkAttempts {
 		attempts++
 
 		batchReq := dynamodb.BatchWriteItemInput{
-			RequestItems: map[string][]*dynamodb.WriteRequest{b.ds.table: chunk},
+			RequestItems: map[string][]types.WriteRequest{b.ds.table: chunk},
 		}
-		res, err = b.ds.ddbClient.BatchWriteItemWithContext(ctx, &batchReq)
+		res, err = b.ds.ddbClient.BatchWriteItem(ctx, &batchReq)
 		if err != nil {
 			return
 		}
@@ -123,29 +125,27 @@ func (b *batch) commitChunk(ctx context.Context, errs chan<- error, chunk []*dyn
 		chunk = res.UnprocessedItems[b.ds.table]
 
 		// sleep using exponential backoff w/ jitter
-		jitter := (b.ds.rand.Float64() * 0.2) + 0.9            // jitter factor is in interval [0.9:1.1]
+		jitter := (rand.Float64() * 0.2) + 0.9                 // jitter factor is in interval [0.9:1.1]
 		delayMS := math.Exp2(float64(attempts)) * 250 * jitter // delays are approx 500, 1000, 2000, 4000, ...
 
-		delay := time.Duration(time.Duration(delayMS) * time.Millisecond)
-		time.Sleep(delay)
-	}
-
-	err = fmt.Errorf("reached max attempts (%d) trying to commit batch to DynamoDB, last error: %w", maxBatchChunkAttempts, err)
-}
-
-// chunk returns a list of chunks, each consisting of a list of array indexes.
-func chunk(len int, chunkSize int) [][]int {
-	if chunkSize == 0 {
-		return nil
-	}
-	var chunks [][]int
-	for i := 0; i < len; i++ {
-		chunkIdx := i / chunkSize
-		elemIdx := i % chunkSize
-		if elemIdx == 0 {
-			chunks = append(chunks, nil)
+		delay := time.Duration(delayMS) * time.Millisecond
+		timer := time.NewTimer(delay)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			err = ctx.Err()
+			return
 		}
-		chunks[chunkIdx] = append(chunks[chunkIdx], i)
 	}
-	return chunks
+
+	// We exhausted retries while DynamoDB kept returning UnprocessedItems.
+	// In the current control flow err is always nil here (any BatchWriteItem
+	// failure returns early above), but the conditional keeps the error
+	// message useful if the retry policy ever grows to retry on err too.
+	if err != nil {
+		err = fmt.Errorf("batch had unprocessed items after %d attempts, last error: %w", maxBatchChunkAttempts, err)
+	} else {
+		err = fmt.Errorf("batch had unprocessed items after %d attempts", maxBatchChunkAttempts)
+	}
 }

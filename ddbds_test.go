@@ -16,13 +16,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/endpoints"
-	"github.com/aws/aws-sdk-go/aws/request"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+	"github.com/aws/smithy-go/middleware"
 	ds "github.com/ipfs/go-datastore"
 	"github.com/ipfs/go-datastore/query"
 	dstest "github.com/ipfs/go-datastore/test"
@@ -41,7 +40,7 @@ var (
 
 	logLevel = golog.LevelInfo
 
-	ddbClient *dynamodb.DynamoDB
+	ddbClient *dynamodb.Client
 )
 
 func init() {
@@ -116,7 +115,7 @@ func downloadDDBLocal(ctx context.Context) error {
 	return nil
 }
 
-func startDDBLocal(ctx context.Context, ddbClient *dynamodb.DynamoDB) (func(), error) {
+func startDDBLocal(ctx context.Context, ddbClient *dynamodb.Client) (func(), error) {
 	var cleanupFunc func()
 
 	// in CI, run DynamoDB Local directly with Java
@@ -167,47 +166,73 @@ func startDDBLocal(ctx context.Context, ddbClient *dynamodb.DynamoDB) (func(), e
 		}
 	}
 
-	// wait for DynamoDB to respond
+	// Wait for DynamoDB to respond. Local startup takes hundreds of
+	// milliseconds; 100 ms is fast enough to keep test-suite overhead in
+	// the noise and slow enough to avoid pegging a core or flooding the
+	// SDK with retried connection refusals.
+	const pollInterval = 100 * time.Millisecond
 	for {
+		if _, err := ddbClient.ListTables(ctx, &dynamodb.ListTablesInput{}); err == nil {
+			break
+		}
 		select {
 		case <-ctx.Done():
 			cleanupFunc()
 			return nil, ctx.Err()
-		default:
-		}
-		_, err := ddbClient.ListTablesWithContext(ctx, &dynamodb.ListTablesInput{})
-		if err == nil {
-			break
+		case <-time.After(pollInterval):
 		}
 	}
 
 	return cleanupFunc, nil
 }
 
-func forceSDKError(err error) func(*request.Request) {
-	return func(r *request.Request) {
-		r.Error = err
-		r.Retryable = aws.Bool(false)
+// forceSDKErrorMiddleware short-circuits a request with err at the Initialize
+// step of the smithy-go middleware stack, before any HTTP work.
+func forceSDKErrorMiddleware(err error) func(*middleware.Stack) error {
+	return func(stack *middleware.Stack) error {
+		return stack.Initialize.Add(
+			middleware.InitializeMiddlewareFunc("forceSDKError",
+				func(ctx context.Context, in middleware.InitializeInput, next middleware.InitializeHandler,
+				) (middleware.InitializeOutput, middleware.Metadata, error) {
+					return middleware.InitializeOutput{}, middleware.Metadata{}, err
+				}),
+			middleware.Before,
+		)
 	}
 }
 
 type clientOpts struct {
 	endpoint   string
 	forceError error
+	// apiOptions installs additional smithy middleware onto the v2 client.
+	// Use this to inject canned responses for failure modes DDB Local
+	// cannot produce on demand (UnprocessedItems, nil response fields,
+	// etc.).
+	apiOptions []func(*middleware.Stack) error
 }
 
-func newDDBClient(opts clientOpts) *dynamodb.DynamoDB {
-	cfg := &aws.Config{
-		Credentials: credentials.NewStaticCredentials("a", "a", "a"),
-		DisableSSL:  aws.Bool(true),
-		Region:      aws.String(endpoints.UsEast1RegionID),
-		Endpoint:    &opts.endpoint,
+func newDDBClient(opts clientOpts) *dynamodb.Client {
+	cfg, err := config.LoadDefaultConfig(context.Background(),
+		config.WithRegion("us-east-1"),
+		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("a", "a", "a")),
+	)
+	if err != nil {
+		panic(err)
 	}
-	sess := session.Must(session.NewSession(cfg))
-	if opts.forceError != nil {
-		sess.Handlers.Send.PushFront(forceSDKError(opts.forceError))
-	}
-	return dynamodb.New(sess)
+	return dynamodb.NewFromConfig(cfg, func(o *dynamodb.Options) {
+		o.BaseEndpoint = aws.String(opts.endpoint)
+		o.EndpointOptions.DisableHTTPS = true
+		if opts.forceError != nil || len(opts.apiOptions) > 0 {
+			// Cap retries at one attempt so that tests injecting an
+			// error the smithy retry classifier happens to consider
+			// retryable do not hang draining the retry budget.
+			o.RetryMaxAttempts = 1
+		}
+		if opts.forceError != nil {
+			o.APIOptions = append(o.APIOptions, forceSDKErrorMiddleware(opts.forceError))
+		}
+		o.APIOptions = append(o.APIOptions, opts.apiOptions...)
+	})
 }
 
 type table struct {
@@ -216,52 +241,113 @@ type table struct {
 	sortKey      string
 }
 
-func setupTables(ddbClient *dynamodb.DynamoDB, tables ...table) {
+func setupTables(ddbClient *dynamodb.Client, tables ...table) {
+	ctx := context.Background()
 	for _, table := range tables {
 		tbl := table
 
-		attrDefs := []*dynamodb.AttributeDefinition{
-			{AttributeName: &tbl.partitionKey, AttributeType: aws.String(dynamodb.ScalarAttributeTypeS)},
+		attrDefs := []types.AttributeDefinition{
+			{AttributeName: &tbl.partitionKey, AttributeType: types.ScalarAttributeTypeS},
 		}
-		keySchema := []*dynamodb.KeySchemaElement{
-			{AttributeName: &tbl.partitionKey, KeyType: aws.String(dynamodb.KeyTypeHash)},
+		keySchema := []types.KeySchemaElement{
+			{AttributeName: &tbl.partitionKey, KeyType: types.KeyTypeHash},
 		}
 		if tbl.sortKey != "" {
-			attrDefs = append(attrDefs, &dynamodb.AttributeDefinition{AttributeName: &tbl.sortKey, AttributeType: aws.String(dynamodb.ScalarAttributeTypeS)})
-			keySchema = append(keySchema, &dynamodb.KeySchemaElement{AttributeName: &tbl.sortKey, KeyType: aws.String(dynamodb.KeyTypeRange)})
+			attrDefs = append(attrDefs, types.AttributeDefinition{AttributeName: &tbl.sortKey, AttributeType: types.ScalarAttributeTypeS})
+			keySchema = append(keySchema, types.KeySchemaElement{AttributeName: &tbl.sortKey, KeyType: types.KeyTypeRange})
 		}
 
 		req := &dynamodb.CreateTableInput{
 			AttributeDefinitions: attrDefs,
 			KeySchema:            keySchema,
 			TableName:            &tbl.name,
-			BillingMode:          aws.String(dynamodb.BillingModeProvisioned),
-			ProvisionedThroughput: &dynamodb.ProvisionedThroughput{
+			BillingMode:          types.BillingModeProvisioned,
+			ProvisionedThroughput: &types.ProvisionedThroughput{
 				ReadCapacityUnits:  aws.Int64(1000),
 				WriteCapacityUnits: aws.Int64(1000),
 			},
 		}
 
 		log.Debugw("creating table", "Table", tbl.name, "Req", req)
-		_, err := ddbClient.CreateTable(req)
+		_, err := ddbClient.CreateTable(ctx, req)
 		if err != nil {
-			// idempotency
-			if awsErr, ok := err.(awserr.Error); ok && awsErr.Code() == dynamodb.ErrCodeResourceInUseException {
-				return
+			// idempotency: an already-existing table is fine, keep going
+			// with the rest of the requested tables.
+			var riu *types.ResourceInUseException
+			if errors.As(err, &riu) {
+				continue
 			}
 			panic(err)
 		}
 	}
 }
 
-func cleanupTables(ddbClient *dynamodb.DynamoDB, tables ...table) {
+func cleanupTables(ddbClient *dynamodb.Client, tables ...table) {
+	ctx := context.Background()
 	for _, t := range tables {
 		log.Debugw("deleting table", "Table", t.name)
-		_, err := ddbClient.DeleteTable(&dynamodb.DeleteTableInput{TableName: &t.name})
+		_, err := ddbClient.DeleteTable(ctx, &dynamodb.DeleteTableInput{TableName: &t.name})
 		if err != nil {
 			panic(err)
 		}
 	}
+}
+
+// TestDDBDatastore_PutWithTTLRoundTrip mirrors how p2p-forge uses this
+// library: a single-namespace key (the peer ID) is written with an hour-
+// long TTL, then read back. This is the only call shape p2p-forge ever
+// uses, so it is the round-trip that must keep working after the v2
+// migration. dstest.SubtestAll does not exercise TTL at all.
+func TestDDBDatastore_PutWithTTLRoundTrip(t *testing.T) {
+	tbl := table{name: tableName, partitionKey: "key"}
+	setupTables(ddbClient, tbl)
+	defer cleanupTables(ddbClient, tbl)
+
+	dsi := New(ddbClient, tableName, WithPartitionkey("key"))
+	ctx := t.Context()
+
+	// Key and value contents are arbitrary; the shape (one namespace,
+	// 32-byte payload) matches what p2p-forge actually stores.
+	key := ds.NewKey("12D3KooWBhYmNAKBhULgB3z1oxqr1qb7HsP2quP9bN6JN6kgmW6Z")
+	value := []byte("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8")
+
+	require.NoError(t, dsi.PutWithTTL(ctx, key, value, time.Hour))
+
+	got, err := dsi.Get(ctx, key)
+	require.NoError(t, err)
+	require.Equal(t, value, got)
+
+	exp, err := dsi.GetExpiration(ctx, key)
+	require.NoError(t, err)
+	require.WithinDuration(t, time.Now().Add(time.Hour), exp, 5*time.Second)
+}
+
+// TestDDBDatastore_SetTTLOnMissingKey covers the
+// ConditionalCheckFailedException to ds.ErrNotFound mapping rewritten by
+// the v2 migration (errors.As against a typed error instead of
+// awserr.Code matching). DynamoDB Local emits the real exception type,
+// so this is the cheapest way to confirm the new error path produces
+// the contract behaviour the Datastore interface promises.
+func TestDDBDatastore_SetTTLOnMissingKey(t *testing.T) {
+	tbl := table{name: tableName, partitionKey: "key"}
+	setupTables(ddbClient, tbl)
+	defer cleanupTables(ddbClient, tbl)
+
+	dsi := New(ddbClient, tableName, WithPartitionkey("key"))
+	err := dsi.SetTTL(t.Context(), ds.NewKey("/never-written"), time.Hour)
+	require.ErrorIs(t, err, ds.ErrNotFound)
+}
+
+// TestDDBDatastore_PutWithSortKeyMissingNamespacesReturnsError pins the
+// fix for the putKey nil-map panic. Before the fix, a Put against a
+// sort-key-configured datastore with a single-namespace key panicked
+// inside putKey ("assignment to entry in nil map"); now it returns
+// ErrInvalidKey. No table is needed because the error returns before
+// any DynamoDB call.
+func TestDDBDatastore_PutWithSortKeyMissingNamespacesReturnsError(t *testing.T) {
+	dsi := New(ddbClient, tableName, WithPartitionkey("pk"), WithSortKey("sk"))
+	err := dsi.Put(t.Context(), ds.NewKey("only-one-namespace"), []byte("v"))
+	require.ErrorIs(t, err, ErrInvalidKey)
 }
 
 func TestDDBDatastore_DSTest(t *testing.T) {
@@ -424,7 +510,7 @@ func TestDDBDatastore_Batch(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			ctx := context.Background()
+			ctx := t.Context()
 			tbl := table{name: tableName, partitionKey: "key"}
 			setupTables(ddbClient, tbl)
 			defer cleanupTables(ddbClient, tbl)
@@ -488,7 +574,7 @@ func TestDDBDatastore_DiskUsage(t *testing.T) {
 		partitionKey: "key",
 	}
 
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("no items should have size == 0", func(t *testing.T) {
 		usage, err := ddbDS.DiskUsage(ctx)
@@ -523,7 +609,7 @@ func TestDDBDatastore_EntryCount(t *testing.T) {
 		partitionKey: "key",
 	}
 
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("no items should have size == 0", func(t *testing.T) {
 		usage, err := ddbDS.EntryCount(ctx)
@@ -577,7 +663,7 @@ func TestDDBDatastore_PutAndGet(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			ctx := context.Background()
+			ctx := t.Context()
 			tbl := table{name: tableName, partitionKey: "key"}
 			setupTables(ddbClient, tbl)
 			defer cleanupTables(ddbClient, tbl)
@@ -898,7 +984,7 @@ func TestDDBDatastore_Query(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			ctx, stop := context.WithTimeout(context.Background(), 60*time.Second)
+			ctx, stop := context.WithTimeout(t.Context(), 60*time.Second)
 			defer stop()
 
 			if c.overrideLogLevel != nil {

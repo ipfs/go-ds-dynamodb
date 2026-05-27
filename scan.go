@@ -4,15 +4,16 @@ import (
 	"context"
 	"sync"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 	"github.com/ipfs/go-datastore/query"
 )
 
 // scanIterator parallel scans a DynamoDB table for a query.
 // The reader can control the consumed read capacity by controlling the rate at which Next() is invoked.
 type scanIterator struct {
-	ddbClient *dynamodb.DynamoDB
+	ddbClient *dynamodb.Client
 	tableName string
 	indexName string
 	segments  int
@@ -26,21 +27,22 @@ type scanIterator struct {
 	cancel     context.CancelFunc
 }
 
-func (s *scanIterator) trySend(result query.Result) bool {
-	log.Debugw("sending scan result", "Result", result)
+// trySend forwards r to ch, or bails out if ctx is cancelled first.
+// Returns true when r was delivered, false when the send lost the race
+// to context cancellation.
+func trySend(ctx context.Context, ch chan<- query.Result, r query.Result) bool {
 	select {
-	case <-s.ctx.Done():
+	case <-ctx.Done():
+		return false
+	case ch <- r:
 		return true
-	case s.resultChan <- result:
 	}
-	return false
 }
 
-func (s *scanIterator) worker(ctx context.Context, segment int64, totalSegments int64) {
-	defer s.doneWG.Done()
+func (s *scanIterator) worker(segment int32, totalSegments int32) {
 	defer log.Debug("scan worker done")
 	log.Debug("scan worker starting")
-	var exclusiveStartKey map[string]*dynamodb.AttributeValue
+	var exclusiveStartKey map[string]types.AttributeValue
 	for {
 		req := &dynamodb.ScanInput{
 			TableName:         &s.tableName,
@@ -58,16 +60,17 @@ func (s *scanIterator) worker(ctx context.Context, segment int64, totalSegments 
 		}
 
 		log.Debugw("scanning", "Req", req)
-		res, err := s.ddbClient.ScanWithContext(s.ctx, req)
+		res, err := s.ddbClient.Scan(s.ctx, req)
 		if err != nil {
-			if s.trySend(query.Result{Error: err}) {
-				return
-			}
+			log.Debugw("sending scan result", "Result", query.Result{Error: err})
+			trySend(s.ctx, s.resultChan, query.Result{Error: err})
+			return
 		}
 		for _, itemMap := range res.Items {
 			log.Debugw("scan got items", "NumItems", len(res.Items))
 			result := itemMapToQueryResult(itemMap, s.keysOnly)
-			if s.trySend(result) {
+			log.Debugw("sending scan result", "Result", result)
+			if !trySend(s.ctx, s.resultChan, result) {
 				return
 			}
 		}
@@ -78,7 +81,7 @@ func (s *scanIterator) worker(ctx context.Context, segment int64, totalSegments 
 	}
 }
 
-func itemMapToQueryResult(itemMap map[string]*dynamodb.AttributeValue, keysOnly bool) query.Result {
+func itemMapToQueryResult(itemMap map[string]types.AttributeValue, keysOnly bool) query.Result {
 	item, err := unmarshalItem(itemMap)
 	if err != nil {
 		return query.Result{Error: err}
@@ -95,11 +98,10 @@ func itemMapToQueryResult(itemMap map[string]*dynamodb.AttributeValue, keysOnly 
 func (s *scanIterator) start(ctx context.Context) {
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	s.resultChan = make(chan query.Result)
-	s.doneWG.Add(s.segments)
-	totalSegments := int64(s.segments)
-	for i := 0; i < s.segments; i++ {
-		segment := int64(i)
-		go s.worker(ctx, segment, totalSegments)
+	totalSegments := int32(s.segments)
+	for i := range s.segments {
+		segment := int32(i)
+		s.doneWG.Go(func() { s.worker(segment, totalSegments) })
 	}
 	// Don't wait on the Close() method to be called to close the chan;
 	// close it as soon as there are no more results, so that Next() will return false.
