@@ -285,6 +285,63 @@ func cleanupTables(ddbClient *dynamodb.Client, tables ...table) {
 	}
 }
 
+// TestDDBDatastore_PutWithTTLRoundTrip mirrors how p2p-forge uses this
+// library: a single-namespace key (the peer ID) is written with an hour-
+// long TTL, then read back. This is the only call shape p2p-forge ever
+// uses, so it is the round-trip that must keep working after the v2
+// migration. dstest.SubtestAll does not exercise TTL at all.
+func TestDDBDatastore_PutWithTTLRoundTrip(t *testing.T) {
+	tbl := table{name: tableName, partitionKey: "key"}
+	setupTables(ddbClient, tbl)
+	defer cleanupTables(ddbClient, tbl)
+
+	dsi := New(ddbClient, tableName, WithPartitionkey("key"))
+	ctx := t.Context()
+
+	// Key and value contents are arbitrary; the shape (one namespace,
+	// 32-byte payload) matches what p2p-forge actually stores.
+	key := ds.NewKey("12D3KooWBhYmNAKBhULgB3z1oxqr1qb7HsP2quP9bN6JN6kgmW6Z")
+	value := []byte("AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8")
+
+	require.NoError(t, dsi.PutWithTTL(ctx, key, value, time.Hour))
+
+	got, err := dsi.Get(ctx, key)
+	require.NoError(t, err)
+	require.Equal(t, value, got)
+
+	exp, err := dsi.GetExpiration(ctx, key)
+	require.NoError(t, err)
+	require.WithinDuration(t, time.Now().Add(time.Hour), exp, 5*time.Second)
+}
+
+// TestDDBDatastore_SetTTLOnMissingKey covers the
+// ConditionalCheckFailedException to ds.ErrNotFound mapping rewritten by
+// the v2 migration (errors.As against a typed error instead of
+// awserr.Code matching). DynamoDB Local emits the real exception type,
+// so this is the cheapest way to confirm the new error path produces
+// the contract behaviour the Datastore interface promises.
+func TestDDBDatastore_SetTTLOnMissingKey(t *testing.T) {
+	tbl := table{name: tableName, partitionKey: "key"}
+	setupTables(ddbClient, tbl)
+	defer cleanupTables(ddbClient, tbl)
+
+	dsi := New(ddbClient, tableName, WithPartitionkey("key"))
+	err := dsi.SetTTL(t.Context(), ds.NewKey("/never-written"), time.Hour)
+	require.ErrorIs(t, err, ds.ErrNotFound)
+}
+
+// TestDDBDatastore_PutWithSortKeyMissingNamespacesReturnsError pins the
+// fix for the putKey nil-map panic. Before the fix, a Put against a
+// sort-key-configured datastore with a single-namespace key panicked
+// inside putKey ("assignment to entry in nil map"); now it returns
+// ErrInvalidKey. No table is needed because the error returns before
+// any DynamoDB call.
+func TestDDBDatastore_PutWithSortKeyMissingNamespacesReturnsError(t *testing.T) {
+	dsi := New(ddbClient, tableName, WithPartitionkey("pk"), WithSortKey("sk"))
+	err := dsi.Put(t.Context(), ds.NewKey("only-one-namespace"), []byte("v"))
+	require.ErrorIs(t, err, ErrInvalidKey)
+}
+
 func TestDDBDatastore_DSTest(t *testing.T) {
 	tbl := table{name: tableName, partitionKey: "key"}
 	setupTables(ddbClient, tbl)
