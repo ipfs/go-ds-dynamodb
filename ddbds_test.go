@@ -445,7 +445,7 @@ func TestDDBDatastore_Batch(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			ctx := context.Background()
+			ctx := t.Context()
 			tbl := table{name: tableName, partitionKey: "key"}
 			setupTables(ddbClient, tbl)
 			defer cleanupTables(ddbClient, tbl)
@@ -509,7 +509,7 @@ func TestDDBDatastore_DiskUsage(t *testing.T) {
 		partitionKey: "key",
 	}
 
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("no items should have size == 0", func(t *testing.T) {
 		usage, err := ddbDS.DiskUsage(ctx)
@@ -544,7 +544,7 @@ func TestDDBDatastore_EntryCount(t *testing.T) {
 		partitionKey: "key",
 	}
 
-	ctx := context.Background()
+	ctx := t.Context()
 
 	t.Run("no items should have size == 0", func(t *testing.T) {
 		usage, err := ddbDS.EntryCount(ctx)
@@ -598,7 +598,7 @@ func TestDDBDatastore_PutAndGet(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			ctx := context.Background()
+			ctx := t.Context()
 			tbl := table{name: tableName, partitionKey: "key"}
 			setupTables(ddbClient, tbl)
 			defer cleanupTables(ddbClient, tbl)
@@ -919,7 +919,7 @@ func TestDDBDatastore_Query(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			ctx, stop := context.WithTimeout(context.Background(), 60*time.Second)
+			ctx, stop := context.WithTimeout(t.Context(), 60*time.Second)
 			defer stop()
 
 			if c.overrideLogLevel != nil {

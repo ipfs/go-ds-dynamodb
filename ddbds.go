@@ -1,9 +1,11 @@
 package ddbds
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 	"time"
@@ -75,9 +77,11 @@ func withDisableScans() func(o *Options) {
 	}
 }
 
-var _ ds.Datastore = (*DDBDatastore)(nil)
-var _ ds.Batching = (*DDBDatastore)(nil)
-var _ ds.PersistentDatastore = (*DDBDatastore)(nil)
+var (
+	_ ds.Datastore           = (*DDBDatastore)(nil)
+	_ ds.Batching            = (*DDBDatastore)(nil)
+	_ ds.PersistentDatastore = (*DDBDatastore)(nil)
+)
 
 func New(ddbClient *dynamodb.Client, table string, optFns ...func(o *Options)) *DDBDatastore {
 	opts := Options{}
@@ -85,26 +89,16 @@ func New(ddbClient *dynamodb.Client, table string, optFns ...func(o *Options)) *
 		o(&opts)
 	}
 
-	ddbDS := &DDBDatastore{
+	return &DDBDatastore{
 		ddbClient:                  ddbClient,
-		scanParallelism:            opts.ScanParallelism,
+		scanParallelism:            cmp.Or(opts.ScanParallelism, 1),
 		useStronglyConsistentReads: opts.UseStronglyConsistentReads,
 		table:                      table,
-		partitionKey:               opts.PartitionKey,
+		partitionKey:               cmp.Or(opts.PartitionKey, attrNameKey),
 		sortKey:                    opts.SortKey,
 		disableQueries:             opts.disableQueries,
 		disableScans:               opts.disableScans,
 	}
-
-	if ddbDS.scanParallelism == 0 {
-		ddbDS.scanParallelism = 1
-	}
-
-	if ddbDS.partitionKey == "" {
-		ddbDS.partitionKey = attrNameKey
-	}
-
-	return ddbDS
 }
 
 type DDBDatastore struct {
@@ -127,8 +121,6 @@ type DDBDatastore struct {
 	disableQueries bool
 	disableScans   bool
 }
-
-var _ ds.Datastore = (*DDBDatastore)(nil)
 
 // ddbItem is a raw DynamoDB item.
 // Note that some attributes may not be present if a projection expression was used when reading the item.
@@ -167,9 +159,9 @@ func (d *DDBDatastore) getItem(ctx context.Context, key ds.Key, attributes []str
 		ConsistentRead: &d.useStronglyConsistentReads,
 	}
 
-	if attributes != nil {
-		projExprStrs := []string{}
-		projExprNames := map[string]string{}
+	if n := len(attributes); n > 0 {
+		projExprStrs := make([]string, 0, n)
+		projExprNames := make(map[string]string, n)
 		for i, attr := range attributes {
 			expr := fmt.Sprintf("#k%d", i)
 			projExprNames[expr] = attr
@@ -241,14 +233,12 @@ func (d *DDBDatastore) makePutItem(key ds.Key, value []byte, ttl time.Duration) 
 		item.Expiration = time.Now().Add(ttl).Unix()
 	}
 
-	itemMap, err := attributevalue.MarshalMap(*item)
+	itemMap, err := attributevalue.MarshalMap(item)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling item: %w", err)
 	}
 
-	for k, v := range keyAttrs {
-		itemMap[k] = v
-	}
+	maps.Copy(itemMap, keyAttrs)
 	return itemMap, nil
 }
 
@@ -401,8 +391,7 @@ func (d *DDBDatastore) PutWithTTL(ctx context.Context, key ds.Key, value []byte,
 }
 
 func (d *DDBDatastore) SetTTL(ctx context.Context, key ds.Key, ttl time.Duration) error {
-	expiration := time.Now().Add(ttl).Unix()
-	expirationStr := strconv.Itoa(int(expiration))
+	expirationStr := strconv.FormatInt(time.Now().Add(ttl).Unix(), 10)
 	keyAttrs, ok := d.putKey(key)
 	if !ok {
 		return ErrInvalidKey
@@ -411,7 +400,7 @@ func (d *DDBDatastore) SetTTL(ctx context.Context, key ds.Key, ttl time.Duration
 	req := &dynamodb.UpdateItemInput{
 		TableName:        &d.table,
 		Key:              keyAttrs,
-		UpdateExpression: aws.String(fmt.Sprintf("SET %s = :e", attrNameExpiration)),
+		UpdateExpression: aws.String("SET " + attrNameExpiration + " = :e"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":e": &types.AttributeValueMemberN{Value: expirationStr},
 		},
