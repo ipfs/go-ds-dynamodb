@@ -128,8 +128,15 @@ func (b *batch) commitChunk(ctx context.Context, errs chan<- error, chunk []type
 		jitter := (rand.Float64() * 0.2) + 0.9                 // jitter factor is in interval [0.9:1.1]
 		delayMS := math.Exp2(float64(attempts)) * 250 * jitter // delays are approx 500, 1000, 2000, 4000, ...
 
-		delay := time.Duration(time.Duration(delayMS) * time.Millisecond)
-		time.Sleep(delay)
+		delay := time.Duration(delayMS) * time.Millisecond
+		timer := time.NewTimer(delay)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			err = ctx.Err()
+			return
+		}
 	}
 
 	err = fmt.Errorf("reached max attempts (%d) trying to commit batch to DynamoDB, last error: %w", maxBatchChunkAttempts, err)
