@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand"
 	"strconv"
 	"strings"
 	"time"
@@ -95,7 +94,6 @@ func New(ddbClient *dynamodb.Client, table string, optFns ...func(o *Options)) *
 		sortKey:                    opts.SortKey,
 		disableQueries:             opts.disableQueries,
 		disableScans:               opts.disableScans,
-		rand:                       rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 
 	if ddbDS.scanParallelism == 0 {
@@ -128,8 +126,6 @@ type DDBDatastore struct {
 
 	disableQueries bool
 	disableScans   bool
-
-	rand *rand.Rand
 }
 
 var _ ds.Datastore = (*DDBDatastore)(nil)

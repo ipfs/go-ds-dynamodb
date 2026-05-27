@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"math/rand/v2"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -124,7 +125,7 @@ func (b *batch) commitChunk(ctx context.Context, errs chan<- error, chunk []type
 		chunk = res.UnprocessedItems[b.ds.table]
 
 		// sleep using exponential backoff w/ jitter
-		jitter := (b.ds.rand.Float64() * 0.2) + 0.9            // jitter factor is in interval [0.9:1.1]
+		jitter := (rand.Float64() * 0.2) + 0.9                 // jitter factor is in interval [0.9:1.1]
 		delayMS := math.Exp2(float64(attempts)) * 250 * jitter // delays are approx 500, 1000, 2000, 4000, ...
 
 		delay := time.Duration(time.Duration(delayMS) * time.Millisecond)
