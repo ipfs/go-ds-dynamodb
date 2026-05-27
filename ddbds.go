@@ -392,7 +392,13 @@ func (d *DDBDatastore) PutWithTTL(ctx context.Context, key ds.Key, value []byte,
 
 func (d *DDBDatastore) SetTTL(ctx context.Context, key ds.Key, ttl time.Duration) error {
 	expirationStr := strconv.FormatInt(time.Now().Add(ttl).Unix(), 10)
-	keyAttrs, ok := d.putKey(key)
+	// UpdateItem's Key may contain only the primary-key attributes
+	// declared by the table schema. putKey would also add the
+	// attrNameKey ("DSKey") attribute, which is fine for PutItem but
+	// invalid here whenever the partition key has been renamed via
+	// WithPartitionkey: DynamoDB rejects the call with
+	// ValidationException.
+	keyAttrs, ok := d.getKey(key)
 	if !ok {
 		return ErrInvalidKey
 	}
