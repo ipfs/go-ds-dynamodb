@@ -140,9 +140,14 @@ func (b *batch) commitChunk(ctx context.Context, errs chan<- error, chunk []type
 	}
 
 	// We exhausted retries while DynamoDB kept returning UnprocessedItems.
-	// err is nil here, because any BatchWriteItem error path returns early
-	// above; wrapping it with %w would render as "<nil>".
-	err = fmt.Errorf("batch had unprocessed items after %d attempts", maxBatchChunkAttempts)
+	// In the current control flow err is always nil here (any BatchWriteItem
+	// failure returns early above), but the conditional keeps the error
+	// message useful if the retry policy ever grows to retry on err too.
+	if err != nil {
+		err = fmt.Errorf("batch had unprocessed items after %d attempts, last error: %w", maxBatchChunkAttempts, err)
+	} else {
+		err = fmt.Errorf("batch had unprocessed items after %d attempts", maxBatchChunkAttempts)
+	}
 }
 
 // chunk returns a list of chunks, each consisting of a list of array indexes.
