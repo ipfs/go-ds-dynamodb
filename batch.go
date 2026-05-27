@@ -3,8 +3,10 @@ package ddbds
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math"
 	"math/rand/v2"
+	"slices"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -14,6 +16,10 @@ import (
 
 const (
 	maxBatchChunkAttempts = 3
+	// dynamoBatchMaxItems is the BatchWriteItem hard limit imposed by
+	// DynamoDB: at most 25 put-or-delete requests per call. See
+	// https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_BatchWriteItem.html
+	dynamoBatchMaxItems = 25
 )
 
 func (d *DDBDatastore) Batch(_ context.Context) (datastore.Batch, error) {
@@ -41,24 +47,19 @@ func (b *batch) Delete(ctx context.Context, key datastore.Key) error {
 }
 
 func (b *batch) Commit(ctx context.Context) error {
-	var keys []datastore.Key
-	for k := range b.reqs {
-		keys = append(keys, k)
-	}
-	return b.commitKeys(ctx, keys)
+	return b.commitKeys(ctx, slices.Collect(maps.Keys(b.reqs)))
 }
 
 func (b *batch) commitKeys(ctx context.Context, keys []datastore.Key) error {
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
 
-	log.Debugf("committing batch", "Batch", keys)
+	log.Debugw("committing batch", "Batch", keys)
 	errs := make(chan error)
-	chunks := chunk(len(keys), 25)
-	for _, chunk := range chunks {
-		var writeReqs []types.WriteRequest
-		for _, keyIdx := range chunk {
-			k := keys[keyIdx]
+	chunkCount := 0
+	for keyChunk := range slices.Chunk(keys, dynamoBatchMaxItems) {
+		writeReqs := make([]types.WriteRequest, 0, len(keyChunk))
+		for _, k := range keyChunk {
 			v := b.reqs[k]
 			if v != nil {
 				// put
@@ -79,20 +80,18 @@ func (b *batch) commitKeys(ctx context.Context, keys []datastore.Key) error {
 					DeleteRequest: &types.DeleteRequest{Key: itemMap},
 				})
 			}
-
 		}
 		go b.commitChunk(ctx, errs, writeReqs)
+		chunkCount++
 	}
 
-	for i := 0; i < len(chunks); i++ {
-		err := <-errs
-		if err != nil {
+	for range chunkCount {
+		if err := <-errs; err != nil {
 			return err
 		}
 	}
 
 	return nil
-
 }
 
 func (b *batch) commitChunk(ctx context.Context, errs chan<- error, chunk []types.WriteRequest) {
@@ -148,21 +147,4 @@ func (b *batch) commitChunk(ctx context.Context, errs chan<- error, chunk []type
 	} else {
 		err = fmt.Errorf("batch had unprocessed items after %d attempts", maxBatchChunkAttempts)
 	}
-}
-
-// chunk returns a list of chunks, each consisting of a list of array indexes.
-func chunk(len int, chunkSize int) [][]int {
-	if chunkSize == 0 {
-		return nil
-	}
-	var chunks [][]int
-	for i := 0; i < len; i++ {
-		chunkIdx := i / chunkSize
-		elemIdx := i % chunkSize
-		if elemIdx == 0 {
-			chunks = append(chunks, nil)
-		}
-		chunks[chunkIdx] = append(chunks[chunkIdx], i)
-	}
-	return chunks
 }
