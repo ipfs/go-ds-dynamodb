@@ -204,6 +204,11 @@ func forceSDKErrorMiddleware(err error) func(*middleware.Stack) error {
 type clientOpts struct {
 	endpoint   string
 	forceError error
+	// apiOptions installs additional smithy middleware onto the v2 client.
+	// Use this to inject canned responses for failure modes DDB Local
+	// cannot produce on demand (UnprocessedItems, nil response fields,
+	// etc.).
+	apiOptions []func(*middleware.Stack) error
 }
 
 func newDDBClient(opts clientOpts) *dynamodb.Client {
@@ -217,13 +222,16 @@ func newDDBClient(opts clientOpts) *dynamodb.Client {
 	return dynamodb.NewFromConfig(cfg, func(o *dynamodb.Options) {
 		o.BaseEndpoint = aws.String(opts.endpoint)
 		o.EndpointOptions.DisableHTTPS = true
-		if opts.forceError != nil {
+		if opts.forceError != nil || len(opts.apiOptions) > 0 {
 			// Cap retries at one attempt so that tests injecting an
 			// error the smithy retry classifier happens to consider
 			// retryable do not hang draining the retry budget.
 			o.RetryMaxAttempts = 1
+		}
+		if opts.forceError != nil {
 			o.APIOptions = append(o.APIOptions, forceSDKErrorMiddleware(opts.forceError))
 		}
+		o.APIOptions = append(o.APIOptions, opts.apiOptions...)
 	})
 }
 
