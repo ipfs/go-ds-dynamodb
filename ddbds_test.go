@@ -166,7 +166,11 @@ func startDDBLocal(ctx context.Context, ddbClient *dynamodb.Client) (func(), err
 		}
 	}
 
-	// wait for DynamoDB to respond
+	// Wait for DynamoDB to respond. Local startup takes hundreds of
+	// milliseconds; 100 ms is fast enough to keep test-suite overhead in
+	// the noise and slow enough to avoid pegging a core or flooding the
+	// SDK with retried connection refusals.
+	const pollInterval = 100 * time.Millisecond
 	for {
 		if _, err := ddbClient.ListTables(ctx, &dynamodb.ListTablesInput{}); err == nil {
 			break
@@ -175,7 +179,7 @@ func startDDBLocal(ctx context.Context, ddbClient *dynamodb.Client) (func(), err
 		case <-ctx.Done():
 			cleanupFunc()
 			return nil, ctx.Err()
-		case <-time.After(100 * time.Millisecond):
+		case <-time.After(pollInterval):
 		}
 	}
 
