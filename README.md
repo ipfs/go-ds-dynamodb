@@ -3,62 +3,69 @@ go-ds-dynamodb
 
 > A DynamoDB Datastore Implementation
 
-This is an implementation of [go-datastore](https://github.com/ipfs/go-datastore) that is backed by DynamoDB.
+This is an implementation of [go-datastore](https://github.com/ipfs/go-datastore) that is backed by DynamoDB. It uses [`aws-sdk-go-v2`](https://github.com/aws/aws-sdk-go-v2).
 
-ddbds includes support for optimized prefix queries. When you setup your table's key schema correctly and register it with ddbds, then incoming queries that match the schema will be converted into DynamoDB queries instead of table scans, enabling high performance, ordered, high-cardinality prefix queries.
+ddbds supports optimized prefix queries. When the table's key schema matches an incoming query, ddbds issues a DynamoDB `Query` instead of a table scan, enabling ordered, high-cardinality prefix queries.
 
 > [!WARNING]
-> Note that ddbds currently only stores values up to 400 kb (the DynamoDB maximum item size). This makes ddbds inappropriate for block storage. It could be extended to fall back to S3, but that is not yet implemented. Within the InterPlanetary ecosystem, it's designed for storing DHT records, IPNS records, peerstore records, etc.
+> ddbds stores values up to 400 kB, the DynamoDB maximum item size, so it is not suitable for block storage. Within IPFS, use it for DHT records, IPNS records, peerstore records, and similar small-value workloads.
 
 ## Setup ##
 
 ### Simple Setup with Unoptimized Queries ###
-ddbds can be used as a simple key-value store, without optimized queries.
+Use ddbds as a plain key-value store when optimized queries are not needed.
 
-In this case, all datastore queries will result in full table scans using the ParallelScan API, and filtering/ordering/etc. will be performed client-side.
-
-This is a good option if your table is small or your data and access patterns would not significantly benefit from optimized queries.
+Datastore queries then run as parallel table scans, and filtering, ordering, and limits are applied client-side. This is a good fit for small tables or workloads that do not benefit from server-side ordering.
 
 ```go
-var ddbClient *dynamodb.Client = ...
-tableName := "datastore-table"
-ddbDS := ddbds.New(ddbClient, tableName)
+import (
+	"context"
+
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/ipfs/go-ds-dynamodb"
+)
+
+cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion("us-east-1"))
+if err != nil {
+	return err
+}
+ddbDS := ddbds.New(dynamodb.NewFromConfig(cfg), "datastore-table")
 ```
 
-By default the expected partition key is `DSKey` of type `string`. The name can be customized with the `WithPartitionKey()` option.
-
+The default partition key is `DSKey` of type `string`. Override it with `WithPartitionkey()`.
 
 ### Optimized Queries ###
-To use optimized prefix queries, you must specify a sort key. 
+Optimized prefix queries require a sort key, and every key written must have at least two parts (for example `/a/b`, not `/a`).
 
-Also, elements written into the datastore should have at least 2 parts, such as `/a/b` and not `/a`. 
-
-`ddbds` splits the key into partition and sort keys.  Examples:
+`ddbds` splits the datastore key into partition and sort key components:
 
 * `/a` -> error (not enough parts)
 * `/a/b` -> [`a`, `b`]
 * `/a/b/c` -> [`a`, `b/c`]
 * etc.
 
-To use optimized queries, simply specify the sort key name using the `WithSortKey()` option:
+Enable optimized queries by setting the sort key name with `WithSortKey()`:
 
 ```go
-var ddbClient *dynamodb.Client = ...
-tableName := "datastore-table"
 ddbDS := ddbds.New(
-	ddbClient, 
-	tableName,
-	ddbds.WithPartitionKey("PartitionKey"),
+	dynamodb.NewFromConfig(cfg),
+	"datastore-table",
+	ddbds.WithPartitionkey("PartitionKey"),
 	ddbds.WithSortKey("SortKey"),
 )
 ```
 
-### Composing Datastores ###
-This datastore can be composed using mount datastores for optimized prefix queries under different namespaces and DynamoDB tables.
+### Other Options ###
 
-Example:
+* `WithStronglyConsistentReads()` issues strongly consistent reads on `Get`, `Has`, and `Query`. Reads cost twice as much and have higher latency, but reflect the latest writes.
+* `WithScanParallelism(n)` sets the segment count for parallel `Scan` requests used by unoptimized queries. Defaults to `1`.
+
+### Composing Datastores ###
+Compose ddbds with a mount datastore to dispatch each namespace to a table tuned for its access pattern.
 
 ```go
+ddbClient := dynamodb.NewFromConfig(cfg)
 ddbDS := mount.New([]mount.Mount{
 	{
 		Prefix: ds.NewKey("/peers/addrs"),
@@ -88,28 +95,16 @@ ddbDS := mount.New([]mount.Mount{
 ```
 
 ### IAM Permissions ###
-The following describes the IAM actions and the datastore methods that use them:
+Each datastore method maps to one DynamoDB API action:
 
-* dynamodb:GetItem
-  * `Get()`
-  * `GetExpiration()`
-  * `GetSize()`
-  * `Has()`
-* dynamodb:PutItem
-  * `Put()`
-  * `PutWithTTL()`
-* dynamodb:DeleteItem
-  * `Delete()`
-* dynamodb:Scan
-  * `Scan()` (if there is no sort key defined)
-* dynamodb:Query
-  * `Query()` (if there is a sort key defined)
-* dynamodb:DescribeTable
-  * `DiskUsage()`
-* dynamodb:UpdateItem
-  * `SetTTL()`
-* dynamodb:BatchWriteItem
-  * `Batch.Commit()`
+* `dynamodb:GetItem` - `Get()`, `GetExpiration()`, `GetSize()`, `Has()`
+* `dynamodb:PutItem` - `Put()`, `PutWithTTL()`
+* `dynamodb:DeleteItem` - `Delete()`
+* `dynamodb:Scan` - `Query()` when no sort key is configured
+* `dynamodb:Query` - `Query()` when a sort key is configured
+* `dynamodb:DescribeTable` - `DiskUsage()`, `EntryCount()`
+* `dynamodb:UpdateItem` - `SetTTL()`
+* `dynamodb:BatchWriteItem` - `Batch.Commit()`
 
 ## Datastore Features ##
 
