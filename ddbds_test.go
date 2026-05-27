@@ -214,6 +214,10 @@ func newDDBClient(opts clientOpts) *dynamodb.Client {
 		o.BaseEndpoint = aws.String(opts.endpoint)
 		o.EndpointOptions.DisableHTTPS = true
 		if opts.forceError != nil {
+			// Cap retries at one attempt so that tests injecting an
+			// error the smithy retry classifier happens to consider
+			// retryable do not hang draining the retry budget.
+			o.RetryMaxAttempts = 1
 			o.APIOptions = append(o.APIOptions, forceSDKErrorMiddleware(opts.forceError))
 		}
 	})
