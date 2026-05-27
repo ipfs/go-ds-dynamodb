@@ -37,8 +37,7 @@ func (s *scanIterator) trySend(result query.Result) bool {
 	return false
 }
 
-func (s *scanIterator) worker(ctx context.Context, segment int32, totalSegments int32) {
-	defer s.doneWG.Done()
+func (s *scanIterator) worker(segment int32, totalSegments int32) {
 	defer log.Debug("scan worker done")
 	log.Debug("scan worker starting")
 	var exclusiveStartKey map[string]types.AttributeValue
@@ -95,11 +94,10 @@ func itemMapToQueryResult(itemMap map[string]types.AttributeValue, keysOnly bool
 func (s *scanIterator) start(ctx context.Context) {
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	s.resultChan = make(chan query.Result)
-	s.doneWG.Add(s.segments)
 	totalSegments := int32(s.segments)
-	for i := 0; i < s.segments; i++ {
+	for i := range s.segments {
 		segment := int32(i)
-		go s.worker(ctx, segment, totalSegments)
+		s.doneWG.Go(func() { s.worker(segment, totalSegments) })
 	}
 	// Don't wait on the Close() method to be called to close the chan;
 	// close it as soon as there are no more results, so that Next() will return false.
