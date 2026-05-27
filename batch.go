@@ -55,8 +55,13 @@ func (b *batch) commitKeys(ctx context.Context, keys []datastore.Key) error {
 	defer stop()
 
 	log.Debugw("committing batch", "Batch", keys)
-	errs := make(chan error)
-	chunkCount := 0
+	// Buffer errs so each goroutine's send always succeeds without a
+	// receiver, even when ctx is cancelled. With an unbuffered channel
+	// the deferred select below would race ctx.Done against the err
+	// send and could exit silently, leaving the parent loop blocked on
+	// <-errs forever.
+	chunkCount := (len(keys) + dynamoBatchMaxItems - 1) / dynamoBatchMaxItems
+	errs := make(chan error, chunkCount)
 	for keyChunk := range slices.Chunk(keys, dynamoBatchMaxItems) {
 		writeReqs := make([]types.WriteRequest, 0, len(keyChunk))
 		for _, k := range keyChunk {
@@ -82,7 +87,6 @@ func (b *batch) commitKeys(ctx context.Context, keys []datastore.Key) error {
 			}
 		}
 		go b.commitChunk(ctx, errs, writeReqs)
-		chunkCount++
 	}
 
 	for range chunkCount {
@@ -99,12 +103,9 @@ func (b *batch) commitChunk(ctx context.Context, errs chan<- error, chunk []type
 
 	var err error
 
-	defer func() {
-		select {
-		case errs <- err:
-		case <-ctx.Done():
-		}
-	}()
+	// errs is buffered to chunkCount in commitKeys, so this send never
+	// blocks even if the parent has already returned.
+	defer func() { errs <- err }()
 
 	var res *dynamodb.BatchWriteItemOutput
 	for attempts < maxBatchChunkAttempts {
