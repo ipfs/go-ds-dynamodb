@@ -17,16 +17,17 @@ func namespaces(k ds.Key) []string {
 	return namespaces
 }
 
-func (d *DDBDatastore) queryKey(queryPrefix ds.Key) (map[string]types.AttributeValue, bool) {
+func (d *DDBDatastore) queryKey(queryPrefix ds.Key) (attrs map[string]types.AttributeValue, partitionValue string, ok bool) {
 	queryPrefixNamespaces := namespaces(queryPrefix)
 
 	if len(queryPrefixNamespaces) == 0 {
-		return nil, false
+		return nil, "", false
 	}
 
+	partitionValue = queryPrefixNamespaces[0]
 	return map[string]types.AttributeValue{
-		d.partitionKey: &types.AttributeValueMemberS{Value: queryPrefixNamespaces[0]},
-	}, true
+		d.partitionKey: &types.AttributeValueMemberS{Value: partitionValue},
+	}, partitionValue, true
 }
 
 func (d *DDBDatastore) putKey(key ds.Key) (map[string]types.AttributeValue, bool) {

@@ -315,7 +315,7 @@ func (d *DDBDatastore) Query(ctx context.Context, q query.Query) (query.Results,
 	var results query.Results
 
 	prefix := ds.NewKey(q.Prefix)
-	keyAttrs, hasQueryKey := d.queryKey(prefix)
+	keyAttrs, partitionKeyValue, hasQueryKey := d.queryKey(prefix)
 
 	shouldQuery := d.sortKey != "" && hasQueryKey
 	if shouldQuery {
@@ -324,7 +324,6 @@ func (d *DDBDatastore) Query(ctx context.Context, q query.Query) (query.Results,
 			return nil, fmt.Errorf("queries on '%s' are disabled", d.table)
 		}
 
-		partitionKeyValue := keyAttrs[d.partitionKey].(*types.AttributeValueMemberS).Value
 		ddbQuery := &dynamodb.QueryInput{
 			TableName:                 &d.table,
 			KeyConditionExpression:    aws.String("#k = :v"),
